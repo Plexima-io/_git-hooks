@@ -27,7 +27,9 @@ _Protect your main branch. Ship with confidence. Focus on building, not fixing l
    ```bash
    cd /path/to/your/repo
    cp ~/Development/__git-hooks/pre-commit .git/hooks/
+   cp ~/Development/__git-hooks/post-commit .git/hooks/
    cp ~/Development/__git-hooks/pre-push .git/hooks/
+   cp ~/Development/__git-hooks/post-push .git/hooks/
    cp ~/Development/__git-hooks/prepare-commit-msg .git/hooks/
    cp -r ~/Development/__git-hooks/shared .git/hooks/
    ```
@@ -35,7 +37,9 @@ _Protect your main branch. Ship with confidence. Focus on building, not fixing l
 3. **Make hooks executable**:
    ```bash
    chmod +x .git/hooks/pre-commit
+   chmod +x .git/hooks/post-commit
    chmod +x .git/hooks/pre-push
+   chmod +x .git/hooks/post-push
    chmod +x .git/hooks/prepare-commit-msg
    chmod +x .git/hooks/shared/*.sh
    ```
@@ -63,12 +67,16 @@ fi
 cd "$REPO_DIR" || exit 1
 
 cp "$HOOKS_DIR/pre-commit" .git/hooks/
+cp "$HOOKS_DIR/post-commit" .git/hooks/
 cp "$HOOKS_DIR/pre-push" .git/hooks/
+cp "$HOOKS_DIR/post-push" .git/hooks/
 cp "$HOOKS_DIR/prepare-commit-msg" .git/hooks/
 cp -r "$HOOKS_DIR/shared" .git/hooks/
 
 chmod +x .git/hooks/pre-commit
+chmod +x .git/hooks/post-commit
 chmod +x .git/hooks/pre-push
+chmod +x .git/hooks/post-push
 chmod +x .git/hooks/prepare-commit-msg
 chmod +x .git/hooks/shared/*.sh
 
@@ -111,27 +119,56 @@ Nested apps (e.g. code under `web/`) should expose root npm scripts that delegat
 - Runs `npm test` when a `test` script exists (Vitest, Jest, Cypress wrappers, etc.)
 - Skipped for Heroku pushes (deploy first, then test the deployed app if needed)
 
+#### Kaloko
+- When `kaloko.config.yml` exists and the root `package.json` has `kaloko:smoke` (or `kaloko`), pre-push runs that script only if the push updates `main` or `master` on a remote other than Heroku
+- Feature-branch pushes skip Kaloko
+- Heroku pushes skip Kaloko the same way they skip unit tests
+- Repos without Kaloko skip this check
+- A merge button on GitHub does not execute this laptop hook
+
 #### Build Checks
 - Runs `npm run build` when pushing to a Heroku remote and a `build` script exists
 - Blocks the push if the build fails
 
+`pre-push` does not call GitHub. After the checks above pass, it starts `post-push` in the background. That refresh cannot block or fail the push.
+
+### ✏️ Open pull request text (`post-commit` & `post-push`)
+
+Git does not provide a post-push hook. `pre-push` starts `post-push` only after the secret, `main` / `master`, test, and build checks have passed.
+
+- **`post-commit`**: remembers that the open pull request description is stale. It does not call GitHub, because the branch may not be on the remote yet.
+- **`post-push`**: after the remote feature branch shows the pushed commit, updates the title and body of an already open pull request. The summary comes from the branch commits. A test plan already on the pull request is kept. If there is no pull request, none is created.
+- Skips Heroku deploys and `main` / `master`.
+- If GitHub cannot be reached, the push still stands.
+
+With `core.hooksPath`, both files are picked up from this directory. If you copy hooks into `.git/hooks/` instead, copy `post-commit` and `post-push` next to `pre-push`.
+
 ### 🎯 Commit Message Helper (`prepare-commit-msg`)
 
-Interactive helper for creating consistent commit messages using Gitmoji and Conventional Commits format.
+Helper for consistent commit messages using Gitmoji and Conventional Commits format.
 
 #### Features:
 - **Gitmoji Support**: Suggests appropriate emojis based on staged files
 - **Conventional Commits**: Encourages format like `feat(scope): description`
 - **Smart Suggestions**: Analyzes staged files and suggests commit type
-- **Interactive Prompt**: Guides you through creating a proper commit message
-- **Help System**: Type `help` to see full Gitmoji reference
+- **Interactive Prompt**: On `git commit` (editor path), guides you through the message
+- **Non-interactive auto-prefix**: On `git commit -m` / `-F`, prefixes a suggested Gitmoji when the message does not already start with one (emoji or `:shortcode:`). Agent HEREDOC commits are covered.
+- **Help System**: Type `help` in the interactive prompt to see the full Gitmoji reference
 
-Skipped for `merge` / `squash` / `commit -m` / `-F` sources so existing messages are not overwritten.
+Left alone for `merge` / `squash` / amend (`-c` / `-C` / `--amend`) so Git’s own messages are not rewritten. Messages that already start with a Gitmoji are not changed.
 
 #### Usage:
 ```bash
+# Interactive: prompt + suggested emoji
 git commit
-# Hook will prompt you with suggestions based on your staged files
+
+# Non-interactive (agents / scripts): keep your text; emoji is added if missing
+git commit -m "$(cat <<'EOF'
+feat(auth): add OAuth2 login
+
+EOF
+)"
+# → ✨ feat(auth): add OAuth2 login
 ```
 
 #### Examples:
@@ -150,18 +187,31 @@ git commit
 4. 🧹 Linting (if available)
 5. ✅ Commit proceeds if all checks pass
 
+### Post-Commit Hook
+1. 📝 Remember that the open pull request description is stale
+2. 🚫 Do not call GitHub (the branch may not be on the remote yet)
+
 ### Pre-Push Hook
 1. 🔒 Block pushes to `main` / `master` (except remote named `heroku`)
 2. 🔒 Security check on commits being pushed
 3. 🧪 `npm test` (non-Heroku, if available)
-4. 🔨 Build check (Heroku only, if available)
-5. ✅ Push proceeds if all checks pass
+4. 🧪 Kaloko smoke only when the push updates `main` or `master` (not a feature branch, not Heroku)
+5. 🔨 Build check (Heroku only, if available)
+6. 📝 Schedule a pull-request refresh without calling GitHub and without waiting on it
+7. ✅ Push proceeds if all checks pass
+
+### Post-Push
+Started by `pre-push` in the background. Git does not invoke this file itself.
+1. ⏳ Wait until the remote feature branch shows the pushed commit
+2. ✏️ If a pull request is already open, update its title and body (summary of why, short test plan)
+3. 🚫 Do not create a pull request
+4. 🚫 A GitHub failure does not fail the push
 
 ### Prepare-Commit-Msg Hook
 1. 📋 Analyzes staged files
 2. 💡 Suggests appropriate Gitmoji and commit type
-3. 🎯 Prompts for commit message
-4. ✏️ Writes formatted message to commit file
+3. 🎯 Interactive: prompts for the commit message; or `-m`/`-F`: auto-prefixes Gitmoji when missing
+4. ✏️ Writes the formatted message to the commit file
 
 ## Bypassing Hooks (Not Recommended)
 
